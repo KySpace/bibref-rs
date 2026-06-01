@@ -6,6 +6,7 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState},
+    scroll::ScrollableElement,
     Root,
     Disableable,
 };
@@ -121,21 +122,67 @@ impl BibRefApp {
             .map(format_bibtex)
     }
 
+    fn author_lines(record: &WorkRecord) -> Vec<String> {
+        let names = record
+            .authors
+            .iter()
+            .map(|author| {
+                let initials = author
+                    .given
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(|ch: char| ch.is_whitespace() || ch == '-')
+                    .filter_map(|part| part.chars().next())
+                    .map(|ch| ch.to_uppercase().collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                if initials.is_empty() {
+                    author.family.clone()
+                } else {
+                    format!("{} {}", initials, author.family)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        match names.len() {
+            0 => vec!["Unknown authors".to_string()],
+            1..=3 => vec![names.join(", ")],
+            len => vec![names[..len - 2].join(", "), names[len - 2..].join(", ")],
+        }
+    }
+
+    fn venue_line(record: &WorkRecord) -> String {
+        let venue = record
+            .container_title
+            .as_deref()
+            .or(record.publisher.as_deref())
+            .unwrap_or(match record.source {
+                SourceKind::Crossref => "Published work",
+                SourceKind::Arxiv => "arXiv preprint",
+            });
+        let mut parts = Vec::new();
+        parts.push(venue.to_string());
+        if let Some(year) = record.year {
+            parts.push(year.to_string());
+        }
+        if let Some(publisher) = &record.publisher {
+            if record.container_title.as_deref() != Some(publisher.as_str()) {
+                parts.push(publisher.clone());
+            }
+        }
+        parts.join(", ")
+    }
+
     fn render_result(&self, index: usize, record: &WorkRecord, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected == Some(index);
-        let source = match record.source {
-            SourceKind::Crossref => "Crossref",
-            SourceKind::Arxiv => "arXiv",
-        };
-        let year = record
-            .year
-            .map(|year| year.to_string())
-            .unwrap_or_else(|| "n.d.".to_string());
-        let subtitle = format!("{} - {} - {}", record.author_summary(), year, source);
+        let author_lines = Self::author_lines(record);
+        let venue_line = Self::venue_line(record);
 
         div()
             .flex()
             .flex_col()
+            .flex_none()
             .gap_1()
             .p_3()
             .rounded_md()
@@ -158,13 +205,25 @@ impl BibRefApp {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(record.title.clone()),
             )
+            .children(author_lines.into_iter().map(|line| {
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .whitespace_normal()
+                    .line_clamp(1)
+                    .text_xs()
+                    .text_color(rgb(0x4f545c))
+                    .child(line)
+            }))
             .child(
                 div()
                     .w_full()
-                    .truncate()
-                    .text_sm()
-                    .text_color(rgb(0x555555))
-                    .child(subtitle),
+                    .overflow_hidden()
+                    .whitespace_normal()
+                    .line_clamp(1)
+                    .text_xs()
+                    .text_color(rgb(0x6d7178))
+                    .child(venue_line),
             )
     }
 }
@@ -243,8 +302,11 @@ impl Render for BibRefApp {
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .h_full()
                             .min_w(px(0.0))
-                            .children(result_rows),
+                            .min_h(px(0.0))
+                            .children(result_rows)
+                            .overflow_y_scrollbar(),
                     ),
             )
             .child(
