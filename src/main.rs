@@ -1,15 +1,59 @@
 use bibref_rs::{format_bibtex, BibSearchClient, SourceKind, WorkRecord};
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context, Entity,
-    IntoElement, Render, SharedString, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context,
+    Entity, IntoElement, Render, SharedString, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState},
     scroll::ScrollableElement,
-    Root,
+    IconNamed, Root,
     Disableable,
 };
+use std::borrow::Cow;
+
+const SEARCH_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M221.09 64a157.09 157.09 0 10157.09 157.09A157.09 157.09 0 00221.09 64z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32" d="M338.29 338.29L448 448"/></svg>"##;
+const REMOVE_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M256 48C141.31 48 48 141.31 48 256s93.31 208 208 208 208-93.31 208-208S370.69 48 256 48z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32" d="M160 256h192"/></svg>"##;
+const COPY_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect x="128" y="128" width="336" height="336" rx="48" ry="48" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="32"/><path d="M384 128V80a32 32 0 00-32-32H80a32 32 0 00-32 32v272a32 32 0 0032 32h48" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32"/></svg>"##;
+const OPEN_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M384 224v184a40 40 0 01-40 40H104a40 40 0 01-40-40V168a40 40 0 0140-40h184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32"/><path d="M336 64h112v112M224 288L440 72" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32"/></svg>"##;
+
+struct BibRefAssets;
+
+impl AssetSource for BibRefAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(match path {
+            "famicons/search-outline.svg" => Some(Cow::Borrowed(SEARCH_ICON)),
+            "famicons/remove-outline.svg" => Some(Cow::Borrowed(REMOVE_ICON)),
+            "famicons/copy-outline.svg" => Some(Cow::Borrowed(COPY_ICON)),
+            "famicons/open-outline.svg" => Some(Cow::Borrowed(OPEN_ICON)),
+            _ => None,
+        })
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FamIcon {
+    Search,
+    Remove,
+    Copy,
+    Open,
+}
+
+impl IconNamed for FamIcon {
+    fn path(self) -> SharedString {
+        match self {
+            Self::Search => "famicons/search-outline.svg",
+            Self::Remove => "famicons/remove-outline.svg",
+            Self::Copy => "famicons/copy-outline.svg",
+            Self::Open => "famicons/open-outline.svg",
+        }
+        .into()
+    }
+}
 
 struct BibRefApp {
     search_input: Entity<InputState>,
@@ -116,6 +160,15 @@ impl BibRefApp {
         }
     }
 
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        self.error = None;
+        self.status = None;
+        cx.notify();
+    }
+
     fn selected_bibtex(&self) -> Option<String> {
         self.selected
             .and_then(|index| self.results.get(index))
@@ -184,6 +237,8 @@ impl BibRefApp {
             .flex_col()
             .flex_none()
             .gap_1()
+            .mr_4()
+            .mb_2()
             .p_3()
             .rounded_md()
             .border_1()
@@ -277,13 +332,24 @@ impl Render for BibRefApp {
                                 Input::new(&self.search_input)
                                     .flex_1()
                                     .min_w(px(140.0))
-                                    .cleanable(true),
+                                    .suffix(
+                                        Button::new("clear-search")
+                                            .icon(FamIcon::Remove)
+                                            .ghost()
+                                            .tooltip("Clear search")
+                                            .on_click(cx.listener(|this, event, window, cx| {
+                                                let _ = event;
+                                                this.clear_search(window, cx)
+                                            })),
+                                    ),
                             )
                             .child(
                                 Button::new("search")
-                                    .label(if self.loading { "Searching" } else { "Search" })
+                                    .icon(FamIcon::Search)
+                                    .tooltip(if self.loading { "Searching" } else { "Search" })
                                     .primary()
                                     .loading(self.loading)
+                                    .loading_icon(FamIcon::Search)
                                     .disabled(self.loading)
                                     .on_click(cx.listener(|this, event, window, cx| {
                                         let _ = event;
@@ -301,7 +367,8 @@ impl Render for BibRefApp {
                         div()
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .gap_3()
+                            .pr_2()
                             .h_full()
                             .min_w(px(0.0))
                             .min_h(px(0.0))
@@ -343,7 +410,8 @@ impl Render for BibRefApp {
                                     .gap_2()
                                     .child(
                                         Button::new("open-selected-url")
-                                            .label("Open DOI/arXiv")
+                                            .icon(FamIcon::Open)
+                                            .tooltip("Open DOI/arXiv")
                                             .outline()
                                             .disabled(!has_selected_url)
                                             .on_click(cx.listener(|this, event, window, cx| {
@@ -353,7 +421,8 @@ impl Render for BibRefApp {
                                     )
                                     .child(
                                         Button::new("copy")
-                                            .label("Copy")
+                                            .icon(FamIcon::Copy)
+                                            .tooltip("Copy")
                                             .primary()
                                             .disabled(self.selected.is_none())
                                             .on_click(cx.listener(|this, event, window, cx| {
@@ -387,7 +456,7 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(BibRefAssets).run(|cx: &mut App| {
         gpui_component::init(cx);
         let bounds = Bounds::centered(None, size(px(980.0), px(640.0)), cx);
         cx.open_window(
