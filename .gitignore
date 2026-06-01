@@ -1,0 +1,23 @@
+# Rust build artifacts
+/target/
+
+# Local cargo configuration and credentials
+/.cargo/config.toml
+/Cargo.lock.bak
+
+# Runtime logs and crash dumps
+*.log
+*.pdb
+*.dmp
+
+# Editor and IDE state
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
