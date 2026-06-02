@@ -41,7 +41,60 @@ pub fn classify_query(input: &str) -> QueryKind {
         return QueryKind::Arxiv(trimmed.to_string());
     }
 
+    if let Some(query) = citation_key_to_query(trimmed) {
+        return QueryKind::Bibliographic(query);
+    }
+
     QueryKind::Bibliographic(trimmed.to_string())
+}
+
+fn citation_key_to_query(input: &str) -> Option<String> {
+    let key = input.trim();
+    if key.contains(char::is_whitespace)
+        || key.len() < 8
+        || !key.chars().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+
+    let bytes = key.as_bytes();
+    for year_start in 2..=bytes.len().saturating_sub(5) {
+        let year_end = year_start + 4;
+        let year = &key[year_start..year_end];
+        if !year.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+
+        let author = &key[..year_start];
+        let title_word = &key[year_end..];
+        if !author.chars().all(|ch| ch.is_ascii_alphabetic())
+            || !title_word.chars().all(|ch| ch.is_ascii_alphabetic())
+        {
+            continue;
+        }
+
+        if !looks_like_year_or_arxiv_month(year) {
+            continue;
+        }
+
+        return Some(format!("{} {} {}", author, year, title_word));
+    }
+
+    None
+}
+
+fn looks_like_year_or_arxiv_month(value: &str) -> bool {
+    let Ok(number) = value.parse::<i32>() else {
+        return false;
+    };
+    if (1800..=2100).contains(&number) {
+        return true;
+    }
+
+    let Some(month) = value.get(2..4).and_then(|part| part.parse::<i32>().ok()) else {
+        return false;
+    };
+    (1..=12).contains(&month)
 }
 
 fn looks_like_arxiv_id(input: &str) -> bool {
@@ -375,6 +428,72 @@ mod tests {
         assert_eq!(
             classify_query("2401.00001"),
             QueryKind::Arxiv("2401.00001".to_string())
+        );
+    }
+
+    #[test]
+    fn classifies_google_scholar_style_citation_keys() {
+        assert_eq!(
+            classify_query("blakie2023compressibility"),
+            QueryKind::Bibliographic("blakie 2023 compressibility".to_string())
+        );
+        assert_eq!(
+            classify_query("Gallemi2025Excitation"),
+            QueryKind::Bibliographic("Gallemi 2025 Excitation".to_string())
+        );
+        assert_eq!(
+            classify_query("compressibility"),
+            QueryKind::Bibliographic("compressibility".to_string())
+        );
+    }
+
+    #[test]
+    fn classifies_citation_keys_from_samples() {
+        let samples = include_str!("../Samples/references.bib");
+        let keys = samples
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if !line.starts_with('@') {
+                    return None;
+                }
+                let key_start = line.find('{')? + 1;
+                let key_end = line[key_start..].find(',')? + key_start;
+                Some(&line[key_start..key_end])
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                "tanzi2019supersolid",
+                "natale2019excitation",
+                "scheiermann2025excitation",
+                "lin2412ai",
+                "vsindik2024sound",
+                "sanchez2023heating",
+                "staub2024new",
+                "biss2023probing",
+            ]
+        );
+
+        let queries = keys
+            .into_iter()
+            .map(classify_query)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            queries,
+            vec![
+                QueryKind::Bibliographic("tanzi 2019 supersolid".to_string()),
+                QueryKind::Bibliographic("natale 2019 excitation".to_string()),
+                QueryKind::Bibliographic("scheiermann 2025 excitation".to_string()),
+                QueryKind::Bibliographic("lin 2412 ai".to_string()),
+                QueryKind::Bibliographic("vsindik 2024 sound".to_string()),
+                QueryKind::Bibliographic("sanchez 2023 heating".to_string()),
+                QueryKind::Bibliographic("staub 2024 new".to_string()),
+                QueryKind::Bibliographic("biss 2023 probing".to_string()),
+            ]
         );
     }
 
