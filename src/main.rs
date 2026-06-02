@@ -6,6 +6,7 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState},
+    resizable::{h_resizable, resizable_panel, ResizableState},
     scroll::ScrollableElement,
     IconNamed, Root,
     Disableable,
@@ -57,6 +58,8 @@ impl IconNamed for FamIcon {
 
 struct BibRefApp {
     search_input: Entity<InputState>,
+    bibtex_input: Entity<InputState>,
+    panels: Entity<ResizableState>,
     client: BibSearchClient,
     results: Vec<WorkRecord>,
     selected: Option<usize>,
@@ -72,9 +75,18 @@ impl BibRefApp {
                 .placeholder("Title, author, DOI, or arXiv ID")
                 .clean_on_escape()
         });
+        let bibtex_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .searchable(true)
+                .placeholder("Select a search result to preview BibTeX.")
+        });
+        let panels = cx.new(|_| ResizableState::default());
 
         Self {
             search_input,
+            bibtex_input,
+            panels,
             client: BibSearchClient::new().expect("HTTP client"),
             results: Vec::new(),
             selected: None,
@@ -284,10 +296,15 @@ impl BibRefApp {
 }
 
 impl Render for BibRefApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bibtex = self
             .selected_bibtex()
             .unwrap_or_else(|| "Select a search result to preview BibTeX.".to_string());
+        if self.bibtex_input.read(cx).value().to_string() != bibtex {
+            self.bibtex_input.update(cx, |state, cx| {
+                state.set_value(bibtex.clone(), window, cx);
+            });
+        }
         let status = self.status.clone().unwrap_or_default();
         let error = self.error.clone().unwrap_or_default();
         let has_selected_url = self
@@ -302,150 +319,147 @@ impl Render for BibRefApp {
             .map(|(index, record)| self.render_result(index, record, cx))
             .collect::<Vec<_>>();
 
-        div()
+        let left_panel = div()
             .flex()
+            .flex_col()
+            .gap_3()
+            .size_full()
+            .p_4()
+            .border_r_1()
+            .border_color(rgb(0xdadce0))
+            .bg(rgb(0xffffff))
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("BibTeX Lookup"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Input::new(&self.search_input)
+                            .flex_1()
+                            .min_w(px(140.0))
+                            .suffix(
+                                Button::new("clear-search")
+                                    .icon(FamIcon::Remove)
+                                    .ghost()
+                                    .tooltip("Clear search")
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        let _ = event;
+                                        this.clear_search(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Button::new("search")
+                            .icon(FamIcon::Search)
+                            .tooltip(if self.loading { "Searching" } else { "Search" })
+                            .primary()
+                            .loading(self.loading)
+                            .loading_icon(FamIcon::Search)
+                            .disabled(self.loading)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                let _ = event;
+                                this.search(window, cx)
+                            })),
+                    ),
+            )
+            .child(div().text_sm().text_color(rgb(0xb3261e)).child(error))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .pr_2()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+                    .children(result_rows)
+                    .overflow_y_scrollbar(),
+            );
+
+        let right_panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .size_full()
+            .min_w(px(0.0))
+            .p_4()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("open-selected-url")
+                            .icon(FamIcon::Open)
+                            .tooltip("Open DOI/arXiv")
+                            .outline()
+                            .disabled(!has_selected_url)
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                let _ = event;
+                                this.open_result(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("copy")
+                            .icon(FamIcon::Copy)
+                            .tooltip("Copy")
+                            .primary()
+                            .disabled(self.selected.is_none())
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                let _ = event;
+                                this.copy_selected(window, cx)
+                            })),
+                    ),
+            )
+            .child(div().text_sm().text_color(rgb(0x1a7340)).child(status))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0xdadce0))
+                    .bg(rgb(0xffffff))
+                    .overflow_hidden()
+                    .child(
+                        Input::new(&self.bibtex_input)
+                            .h_full()
+                            .w_full()
+                            .font_family("Consolas")
+                            .text_sm(),
+                    ),
+            );
+
+        div()
             .size_full()
             .overflow_hidden()
             .bg(rgb(0xf6f7f9))
             .text_color(rgb(0x202124))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_shrink()
-                    .flex_basis(px(320.0))
-                    .gap_3()
-                    .min_w(px(240.0))
-                    .max_w(px(360.0))
-                    .h_full()
-                    .p_4()
-                    .border_r_1()
-                    .border_color(rgb(0xdadce0))
-                    .bg(rgb(0xffffff))
-                    .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("BibTeX Lookup"))
+                h_resizable("main-panels")
+                    .with_state(&self.panels)
                     .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Input::new(&self.search_input)
-                                    .flex_1()
-                                    .min_w(px(140.0))
-                                    .suffix(
-                                        Button::new("clear-search")
-                                            .icon(FamIcon::Remove)
-                                            .ghost()
-                                            .tooltip("Clear search")
-                                            .on_click(cx.listener(|this, event, window, cx| {
-                                                let _ = event;
-                                                this.clear_search(window, cx)
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                Button::new("search")
-                                    .icon(FamIcon::Search)
-                                    .tooltip(if self.loading { "Searching" } else { "Search" })
-                                    .primary()
-                                    .loading(self.loading)
-                                    .loading_icon(FamIcon::Search)
-                                    .disabled(self.loading)
-                                    .on_click(cx.listener(|this, event, window, cx| {
-                                        let _ = event;
-                                        this.search(window, cx)
-                                    })),
-                            ),
+                        resizable_panel()
+                            .size(px(490.0))
+                            .size_range(px(260.0)..px(1200.0))
+                            .child(left_panel),
                     )
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xb3261e))
-                            .child(error),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .pr_2()
-                            .h_full()
-                            .min_w(px(0.0))
-                            .min_h(px(0.0))
-                            .children(result_rows)
-                            .overflow_y_scrollbar(),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .h_full()
-                    .p_4()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w(px(180.0))
-                                    .flex_1()
-                                    .text_lg()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Formatted BibTeX"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .flex_shrink()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("open-selected-url")
-                                            .icon(FamIcon::Open)
-                                            .tooltip("Open DOI/arXiv")
-                                            .outline()
-                                            .disabled(!has_selected_url)
-                                            .on_click(cx.listener(|this, event, window, cx| {
-                                                let _ = event;
-                                                this.open_result(window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("copy")
-                                            .icon(FamIcon::Copy)
-                                            .tooltip("Copy")
-                                            .primary()
-                                            .disabled(self.selected.is_none())
-                                            .on_click(cx.listener(|this, event, window, cx| {
-                                                let _ = event;
-                                                this.copy_selected(window, cx)
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .child(div().text_sm().text_color(rgb(0x1a7340)).child(status))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .p_4()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(0xdadce0))
-                            .bg(rgb(0xffffff))
-                            .overflow_hidden()
-                            .font_family("Consolas")
-                            .text_sm()
-                            .child(SharedString::from(bibtex)),
+                        resizable_panel()
+                            .size_range(px(320.0)..px(2000.0))
+                            .child(right_panel),
                     ),
             )
     }
