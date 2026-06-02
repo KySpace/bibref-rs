@@ -1,7 +1,8 @@
 use bibref_rs::{format_bibtex, BibSearchClient, SourceKind, WorkRecord};
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context,
-    Entity, IntoElement, Render, SharedString, Window, WindowBounds, WindowOptions,
+    Entity, IntoElement, Render, SharedString, TitlebarOptions, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -387,7 +388,7 @@ impl Render for BibRefApp {
         let right_panel = div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .size_full()
             .min_w(px(0.0))
             .p_4()
@@ -422,7 +423,9 @@ impl Render for BibRefApp {
                             })),
                     ),
             )
-            .child(div().text_sm().text_color(rgb(0x1a7340)).child(status))
+            .when(!status.is_empty(), |this| {
+                this.child(div().text_sm().text_color(rgb(0x1a7340)).child(status))
+            })
             .child(
                 div()
                     .flex_1()
@@ -476,6 +479,11 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("BibTeX Lookup".into()),
+                    appears_transparent: false,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             |window, cx| {
