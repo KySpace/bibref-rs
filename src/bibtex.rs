@@ -48,7 +48,10 @@ pub fn format_bibtex(record: &WorkRecord) -> String {
     push_field(
         &mut fields,
         "eprint",
-        record.arxiv_id.as_ref().map(|value| value.trim().to_string()),
+        record
+            .arxiv_id
+            .as_ref()
+            .map(|value| value.trim().to_string()),
     );
 
     let body = fields

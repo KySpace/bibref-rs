@@ -1,3 +1,5 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use bibref_rs::{format_bibtex, BibSearchClient, SourceKind, WorkRecord};
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context,
