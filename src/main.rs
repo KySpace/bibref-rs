@@ -1,4 +1,7 @@
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 use bibref_rs::{format_bibtex, BibSearchClient, SourceKind, WorkRecord};
 use gpui::{
@@ -8,11 +11,11 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
     input::{Input, InputState},
     resizable::{h_resizable, resizable_panel, ResizableState},
     scroll::ScrollableElement,
-    IconNamed, Root,
-    Disableable,
+    Disableable, IconNamed, Root,
 };
 use std::borrow::Cow;
 
@@ -69,6 +72,7 @@ struct BibRefApp {
     loading: bool,
     error: Option<String>,
     status: Option<String>,
+    copy_with_fence: bool,
 }
 
 impl BibRefApp {
@@ -96,6 +100,7 @@ impl BibRefApp {
             loading: false,
             error: None,
             status: None,
+            copy_with_fence: false,
         }
     }
 
@@ -138,22 +143,13 @@ impl BibRefApp {
         .detach();
     }
 
-    fn select_result(
-        &mut self,
-        index: usize,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_result(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(index);
         self.status = None;
         cx.notify();
     }
 
-    fn open_result(
-        &mut self,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_result(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = self
             .selected
             .and_then(|index| self.results.get(index))
@@ -163,13 +159,14 @@ impl BibRefApp {
         }
     }
 
-    fn copy_selected(
-        &mut self,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn copy_selected(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(bibtex) = self.selected_bibtex() {
-            cx.write_to_clipboard(ClipboardItem::new_string(bibtex));
+            let copied_text = if self.copy_with_fence {
+                format!("```\n{}\n```", bibtex)
+            } else {
+                bibtex
+            };
+            cx.write_to_clipboard(ClipboardItem::new_string(copied_text));
             self.status = Some("Copied BibTeX to clipboard.".to_string());
             cx.notify();
         }
@@ -242,7 +239,12 @@ impl BibRefApp {
         parts.join(", ")
     }
 
-    fn render_result(&self, index: usize, record: &WorkRecord, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_result(
+        &self,
+        index: usize,
+        record: &WorkRecord,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let selected = self.selected == Some(index);
         let author_lines = Self::author_lines(record);
         let venue_line = Self::venue_line(record);
@@ -257,13 +259,19 @@ impl BibRefApp {
             .p_3()
             .rounded_md()
             .border_1()
-            .border_color(if selected { rgb(0x2f6fed) } else { rgb(0xd8d8d8) })
-            .bg(if selected { rgb(0xeef4ff) } else { rgb(0xffffff) })
+            .border_color(if selected {
+                rgb(0x2f6fed)
+            } else {
+                rgb(0xd8d8d8)
+            })
+            .bg(if selected {
+                rgb(0xeef4ff)
+            } else {
+                rgb(0xffffff)
+            })
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    this.select_result(index, window, cx)
-                }),
+                cx.listener(move |this, _event, window, cx| this.select_result(index, window, cx)),
             )
             .child(
                 div()
@@ -321,6 +329,7 @@ impl Render for BibRefApp {
             .enumerate()
             .map(|(index, record)| self.render_result(index, record, cx))
             .collect::<Vec<_>>();
+        let app = cx.entity().clone();
 
         let left_panel = div()
             .flex()
@@ -414,6 +423,17 @@ impl Render for BibRefApp {
                             })),
                     )
                     .child(
+                        Checkbox::new("copy-with-code-fence")
+                            .label("Code fence")
+                            .checked(self.copy_with_fence)
+                            .on_click(move |checked, _window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.copy_with_fence = *checked;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
                         Button::new("copy")
                             .icon(FamIcon::Copy)
                             .tooltip("Copy")
@@ -475,25 +495,27 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    Application::new().with_assets(BibRefAssets).run(|cx: &mut App| {
-        gpui_component::init(cx);
-        let bounds = Bounds::centered(None, size(px(980.0), px(640.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("BibTeX Lookup".into()),
-                    appears_transparent: false,
+    Application::new()
+        .with_assets(BibRefAssets)
+        .run(|cx: &mut App| {
+            gpui_component::init(cx);
+            let bounds = Bounds::centered(None, size(px(980.0), px(640.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("BibTeX Lookup".into()),
+                        appears_transparent: false,
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| BibRefApp::new(window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| BibRefApp::new(window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }

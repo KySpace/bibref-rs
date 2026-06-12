@@ -155,14 +155,8 @@ impl BibSearchClient {
 
     fn crossref_doi(&self, doi: &str) -> Result<WorkRecord> {
         let url = format!("{}/{}", CROSSREF_BASE, urlencoding::encode(doi));
-        let response: CrossrefWorkResponse = self
-            .http
-            .get(url)
-            .send()
-            ?
-            .error_for_status()?
-            .json()
-            ?;
+        let response: CrossrefWorkResponse =
+            self.http.get(url).send()?.error_for_status()?.json()?;
         Ok(crossref_item_to_record(response.message))
     }
 
@@ -172,14 +166,8 @@ impl BibSearchClient {
             CROSSREF_BASE,
             urlencoding::encode(query)
         );
-        let response: CrossrefSearchResponse = self
-            .http
-            .get(url)
-            .send()
-            ?
-            .error_for_status()?
-            .json()
-            ?;
+        let response: CrossrefSearchResponse =
+            self.http.get(url).send()?.error_for_status()?.json()?;
         Ok(response
             .message
             .items
@@ -211,12 +199,19 @@ impl BibSearchClient {
         );
         let text = self.http.get(url).send()?.error_for_status()?.text()?;
         let feed: ArxivFeed = from_str(&text).context("parsing arXiv Atom response")?;
-        Ok(feed.entries.into_iter().map(arxiv_entry_to_record).collect())
+        Ok(feed
+            .entries
+            .into_iter()
+            .map(arxiv_entry_to_record)
+            .collect())
     }
 }
 
 fn merge_or_push(records: &mut Vec<WorkRecord>, candidate: WorkRecord) {
-    if let Some(existing) = records.iter_mut().find(|record| same_work(record, &candidate)) {
+    if let Some(existing) = records
+        .iter_mut()
+        .find(|record| same_work(record, &candidate))
+    {
         existing.merge_missing_from(&candidate);
     } else {
         records.push(candidate);
@@ -400,7 +395,11 @@ fn split_arxiv_author(name: &str) -> Author {
 }
 
 fn clean_text(input: impl AsRef<str>) -> String {
-    input.as_ref().split_whitespace().collect::<Vec<_>>().join(" ")
+    input
+        .as_ref()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -477,10 +476,7 @@ mod tests {
             ]
         );
 
-        let queries = keys
-            .into_iter()
-            .map(classify_query)
-            .collect::<Vec<_>>();
+        let queries = keys.into_iter().map(classify_query).collect::<Vec<_>>();
 
         assert_eq!(
             queries,
