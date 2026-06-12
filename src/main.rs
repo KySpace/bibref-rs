@@ -3,7 +3,9 @@
     windows_subsystem = "windows"
 )]
 
-use bibref_rs::{format_bibtex, BibSearchClient, SourceKind, WorkRecord};
+use bibref_rs::{
+    format_bibtex, BibSearchClient, FilterField, SearchFilter, SourceKind, WorkRecord,
+};
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context,
     Entity, IntoElement, Render, SharedString, TitlebarOptions, Window, WindowBounds,
@@ -15,7 +17,8 @@ use gpui_component::{
     input::{Input, InputState},
     resizable::{h_resizable, resizable_panel, ResizableState},
     scroll::ScrollableElement,
-    Disableable, IconNamed, Root,
+    select::{Select, SelectState},
+    Disableable, IconNamed, IndexPath, Root,
 };
 use std::borrow::Cow;
 
@@ -64,6 +67,8 @@ impl IconNamed for FamIcon {
 
 struct BibRefApp {
     search_input: Entity<InputState>,
+    filter_input: Entity<InputState>,
+    filter_type: Entity<SelectState<Vec<&'static str>>>,
     bibtex_input: Entity<InputState>,
     panels: Entity<ResizableState>,
     client: BibSearchClient,
@@ -82,6 +87,19 @@ impl BibRefApp {
                 .placeholder("Title, author, DOI, or arXiv ID")
                 .clean_on_escape()
         });
+        let filter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Refine results")
+                .clean_on_escape()
+        });
+        let filter_type = cx.new(|cx| {
+            SelectState::new(
+                vec!["General", "Author", "Journal", "Year", "Title"],
+                Some(IndexPath::default().row(2)),
+                window,
+                cx,
+            )
+        });
         let bibtex_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -92,6 +110,8 @@ impl BibRefApp {
 
         Self {
             search_input,
+            filter_input,
+            filter_type,
             bibtex_input,
             panels,
             client: BibSearchClient::new().expect("HTTP client"),
@@ -119,8 +139,16 @@ impl BibRefApp {
         self.selected = None;
         cx.notify();
 
+        let filter_keyword = self.filter_input.read(cx).value().to_string();
+        let filter = (!filter_keyword.trim().is_empty()).then(|| {
+            SearchFilter::new(
+                self.selected_filter_field(cx),
+                filter_keyword.trim().to_string(),
+            )
+        });
         let client = self.client.clone();
-        let search_task = cx.background_spawn(async move { client.search(&query) });
+        let search_task =
+            cx.background_spawn(async move { client.search_with_filter(&query, filter.as_ref()) });
         cx.spawn(async move |this, cx| {
             let result = search_task.await;
             let _ = this.update(cx, |this, cx| {
@@ -179,6 +207,23 @@ impl BibRefApp {
         self.error = None;
         self.status = None;
         cx.notify();
+    }
+
+    fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        cx.notify();
+    }
+
+    fn selected_filter_field(&self, cx: &Context<Self>) -> FilterField {
+        match self.filter_type.read(cx).selected_value().copied() {
+            Some("General") => FilterField::General,
+            Some("Author") => FilterField::Author,
+            Some("Year") => FilterField::Year,
+            Some("Title") => FilterField::Title,
+            _ => FilterField::Journal,
+        }
     }
 
     fn selected_bibtex(&self) -> Option<String> {
@@ -380,6 +425,32 @@ impl Render for BibRefApp {
                                 let _ = event;
                                 this.search(window, cx)
                             })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Input::new(&self.filter_input)
+                            .flex_1()
+                            .min_w(px(120.0))
+                            .suffix(
+                                Button::new("clear-filter")
+                                    .icon(FamIcon::Remove)
+                                    .ghost()
+                                    .tooltip("Clear filter")
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        let _ = event;
+                                        this.clear_filter(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Select::new(&self.filter_type)
+                            .w(px(108.0))
+                            .menu_width(px(120.0)),
                     ),
             )
             .child(div().text_sm().text_color(rgb(0xb3261e)).child(error))

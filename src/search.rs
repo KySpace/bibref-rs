@@ -23,6 +23,30 @@ pub struct CitationKeyQuery {
     pub publication_year: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterField {
+    General,
+    Author,
+    Journal,
+    Year,
+    Title,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFilter {
+    pub field: FilterField,
+    pub keyword: String,
+}
+
+impl SearchFilter {
+    pub fn new(field: FilterField, keyword: impl Into<String>) -> Self {
+        Self {
+            field,
+            keyword: keyword.into(),
+        }
+    }
+}
+
 pub fn classify_query(input: &str) -> QueryKind {
     let trimmed = input.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -149,22 +173,43 @@ impl BibSearchClient {
     }
 
     pub fn search(&self, input: &str) -> Result<Vec<WorkRecord>> {
+        self.search_with_filter(input, None)
+    }
+
+    pub fn search_with_filter(
+        &self,
+        input: &str,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
         match classify_query(input) {
-            QueryKind::Doi(doi) => self.crossref_doi(&doi).map(|record| vec![record]),
-            QueryKind::Arxiv(id) => self.arxiv_id(&id).map(|record| vec![record]),
-            QueryKind::CitationKey(query) => self.search_citation_key(&query),
-            QueryKind::Bibliographic(query) => self.search_bibliographic(&query),
+            QueryKind::Doi(doi) => self
+                .crossref_doi(&doi)
+                .map(|record| filtered_records(vec![record], filter)),
+            QueryKind::Arxiv(id) => self
+                .arxiv_id(&id)
+                .map(|record| filtered_records(vec![record], filter)),
+            QueryKind::CitationKey(query) => self.search_citation_key(&query, filter),
+            QueryKind::Bibliographic(query) => self.search_bibliographic(&query, filter),
         }
     }
 
-    fn search_citation_key(&self, query: &CitationKeyQuery) -> Result<Vec<WorkRecord>> {
-        let mut records = self.crossref_citation_query(query).unwrap_or_default();
+    fn search_citation_key(
+        &self,
+        query: &CitationKeyQuery,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
+        let mut records = self
+            .crossref_citation_query(query, filter)
+            .unwrap_or_default();
 
-        for arxiv_record in self.arxiv_citation_query(query).unwrap_or_default() {
+        for arxiv_record in self.arxiv_citation_query(query, filter).unwrap_or_default() {
             merge_or_push(&mut records, arxiv_record);
         }
 
         records.retain(|record| citation_candidate_matches(record, query));
+        if let Some(filter) = filter {
+            records.retain(|record| record_matches_filter(record, filter));
+        }
         records.sort_by(|left, right| {
             citation_title_starts_with(right, query)
                 .cmp(&citation_title_starts_with(left, query))
@@ -176,16 +221,23 @@ impl BibSearchClient {
         Ok(records.into_iter().take(5).collect())
     }
 
-    fn search_bibliographic(&self, query: &str) -> Result<Vec<WorkRecord>> {
-        let mut records = self.crossref_query(query).unwrap_or_default();
+    fn search_bibliographic(
+        &self,
+        query: &str,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
+        let mut records = self.crossref_query(query, filter).unwrap_or_default();
 
         if records.len() < 3 {
-            for arxiv_record in self.arxiv_query(query).unwrap_or_default() {
+            for arxiv_record in self.arxiv_query(query, filter).unwrap_or_default() {
                 merge_or_push(&mut records, arxiv_record);
             }
         }
 
-        Ok(records.into_iter().take(5).collect())
+        Ok(filtered_records(records, filter)
+            .into_iter()
+            .take(5)
+            .collect())
     }
 
     fn crossref_doi(&self, doi: &str) -> Result<WorkRecord> {
@@ -195,12 +247,18 @@ impl BibSearchClient {
         Ok(crossref_item_to_record(response.message))
     }
 
-    fn crossref_query(&self, query: &str) -> Result<Vec<WorkRecord>> {
-        let url = format!(
-            "{}?query.bibliographic={}&rows=5",
+    fn crossref_query(
+        &self,
+        query: &str,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
+        let mut url = format!(
+            "{}?query.bibliographic={}&rows={}",
             CROSSREF_BASE,
-            urlencoding::encode(query)
+            urlencoding::encode(query),
+            if filter.is_some() { 25 } else { 5 }
         );
+        append_crossref_filter(&mut url, filter);
         let response: CrossrefSearchResponse =
             self.http.get(url).send()?.error_for_status()?.json()?;
         Ok(response
@@ -211,7 +269,11 @@ impl BibSearchClient {
             .collect())
     }
 
-    fn crossref_citation_query(&self, query: &CitationKeyQuery) -> Result<Vec<WorkRecord>> {
+    fn crossref_citation_query(
+        &self,
+        query: &CitationKeyQuery,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
         let mut url = format!(
             "{}?query.author={}&query.title={}&rows=100",
             CROSSREF_BASE,
@@ -223,6 +285,7 @@ impl BibSearchClient {
                 "&filter=from-pub-date:{year}-01-01,until-pub-date:{year}-12-31"
             ));
         }
+        append_crossref_filter(&mut url, filter);
 
         let response: CrossrefSearchResponse =
             self.http.get(url).send()?.error_for_status()?.json()?;
@@ -249,11 +312,13 @@ impl BibSearchClient {
             .context("arXiv returned no records")
     }
 
-    fn arxiv_query(&self, query: &str) -> Result<Vec<WorkRecord>> {
+    fn arxiv_query(&self, query: &str, filter: Option<&SearchFilter>) -> Result<Vec<WorkRecord>> {
+        let search_query = arxiv_filter_query(format!("all:{query}"), filter);
         let url = format!(
-            "{}?search_query=all:{}&start=0&max_results=5",
+            "{}?search_query={}&start=0&max_results={}",
             ARXIV_BASE,
-            urlencoding::encode(query)
+            urlencoding::encode(&search_query),
+            if filter.is_some() { 25 } else { 5 }
         );
         let text = self.http.get(url).send()?.error_for_status()?.text()?;
         let feed: ArxivFeed = from_str(&text).context("parsing arXiv Atom response")?;
@@ -264,8 +329,15 @@ impl BibSearchClient {
             .collect())
     }
 
-    fn arxiv_citation_query(&self, query: &CitationKeyQuery) -> Result<Vec<WorkRecord>> {
-        let search_query = format!("au:{} AND ti:{}", query.author, query.title_word);
+    fn arxiv_citation_query(
+        &self,
+        query: &CitationKeyQuery,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
+        let search_query = arxiv_filter_query(
+            format!("au:{} AND ti:{}", query.author, query.title_word),
+            filter,
+        );
         let url = format!(
             "{}?search_query={}&start=0&max_results=25",
             ARXIV_BASE,
@@ -278,6 +350,81 @@ impl BibSearchClient {
             .into_iter()
             .map(arxiv_entry_to_record)
             .collect())
+    }
+}
+
+fn append_crossref_filter(url: &mut String, filter: Option<&SearchFilter>) {
+    let Some(filter) = filter.filter(|filter| !filter.keyword.trim().is_empty()) else {
+        return;
+    };
+    let keyword = urlencoding::encode(filter.keyword.trim());
+    match filter.field {
+        FilterField::General => url.push_str(&format!("&query.bibliographic={keyword}")),
+        FilterField::Author => url.push_str(&format!("&query.author={keyword}")),
+        FilterField::Journal => url.push_str(&format!("&query.container-title={keyword}")),
+        FilterField::Title => url.push_str(&format!("&query.title={keyword}")),
+        FilterField::Year => {
+            if let Ok(year) = filter.keyword.trim().parse::<i32>() {
+                if !url.contains("&filter=") {
+                    url.push_str(&format!(
+                        "&filter=from-pub-date:{year}-01-01,until-pub-date:{year}-12-31"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn arxiv_filter_query(base: String, filter: Option<&SearchFilter>) -> String {
+    let Some(filter) = filter.filter(|filter| !filter.keyword.trim().is_empty()) else {
+        return base;
+    };
+    let keyword = filter.keyword.trim();
+    match filter.field {
+        FilterField::General => format!("{base} AND all:{keyword}"),
+        FilterField::Author => format!("{base} AND au:{keyword}"),
+        FilterField::Title => format!("{base} AND ti:{keyword}"),
+        FilterField::Journal | FilterField::Year => base,
+    }
+}
+
+fn filtered_records(records: Vec<WorkRecord>, filter: Option<&SearchFilter>) -> Vec<WorkRecord> {
+    let Some(filter) = filter.filter(|filter| !filter.keyword.trim().is_empty()) else {
+        return records;
+    };
+    records
+        .into_iter()
+        .filter(|record| record_matches_filter(record, filter))
+        .collect()
+}
+
+fn record_matches_filter(record: &WorkRecord, filter: &SearchFilter) -> bool {
+    let keyword = filter.keyword.trim().to_lowercase();
+    if keyword.is_empty() {
+        return true;
+    }
+    let contains = |value: &str| value.to_lowercase().contains(&keyword);
+
+    match filter.field {
+        FilterField::General => {
+            contains(&record.title)
+                || record
+                    .authors
+                    .iter()
+                    .any(|author| contains(&author.display_name()))
+                || record.container_title.as_deref().is_some_and(contains)
+                || record.publisher.as_deref().is_some_and(contains)
+                || record.year.is_some_and(|year| contains(&year.to_string()))
+                || record.doi.as_deref().is_some_and(contains)
+                || record.arxiv_id.as_deref().is_some_and(contains)
+        }
+        FilterField::Author => record
+            .authors
+            .iter()
+            .any(|author| contains(&author.display_name())),
+        FilterField::Journal => record.container_title.as_deref().is_some_and(contains),
+        FilterField::Year => record.year.is_some_and(|year| contains(&year.to_string())),
+        FilterField::Title => contains(&record.title),
     }
 }
 
@@ -692,6 +839,26 @@ mod tests {
 
         assert!(citation_match_score(&exact, &query) > citation_match_score(&unrelated, &query));
         assert!(citation_title_starts_with(&exact, &query));
+        assert!(record_matches_filter(
+            &exact,
+            &SearchFilter::new(FilterField::Journal, "nature")
+        ));
+        assert!(record_matches_filter(
+            &exact,
+            &SearchFilter::new(FilterField::Author, "shuo ma")
+        ));
+        assert!(record_matches_filter(
+            &exact,
+            &SearchFilter::new(FilterField::Year, "2023")
+        ));
+        assert!(record_matches_filter(
+            &exact,
+            &SearchFilter::new(FilterField::Title, "mid-circuit")
+        ));
+        assert!(!record_matches_filter(
+            &exact,
+            &SearchFilter::new(FilterField::Journal, "science")
+        ));
 
         let contains_later = WorkRecord {
             title: "A model with high accuracy".to_string(),
