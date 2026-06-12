@@ -8,13 +8,13 @@ use bibref_rs::{
 };
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context,
-    Entity, IntoElement, Render, SharedString, TitlebarOptions, Window, WindowBounds,
-    WindowOptions,
+    Entity, IntoElement, MouseButton, Render, SharedString, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState, SelectAll},
     resizable::{h_resizable, resizable_panel, ResizableState},
     scroll::ScrollableElement,
     select::{Select, SelectState},
@@ -78,6 +78,7 @@ struct BibRefApp {
     error: Option<String>,
     status: Option<String>,
     copy_with_fence: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl BibRefApp {
@@ -107,6 +108,26 @@ impl BibRefApp {
                 .placeholder("Select a search result to preview BibTeX.")
         });
         let panels = cx.new(|_| ResizableState::default());
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &search_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.search(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &filter_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.search(window, cx);
+                    }
+                },
+            ),
+        ];
 
         Self {
             search_input,
@@ -120,11 +141,16 @@ impl BibRefApp {
             loading: false,
             error: None,
             status: None,
-            copy_with_fence: false,
+            copy_with_fence: true,
+            _subscriptions: subscriptions,
         }
     }
 
     fn search(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+
         let query = self.search_input.read(cx).value().to_string();
         if query.trim().is_empty() {
             self.error = Some("Enter a DOI, title, author, or arXiv ID.".to_string());
@@ -399,18 +425,27 @@ impl Render for BibRefApp {
                     .flex_wrap()
                     .gap_2()
                     .child(
-                        Input::new(&self.search_input)
+                        div()
                             .flex_1()
                             .min_w(px(140.0))
-                            .suffix(
-                                Button::new("clear-search")
-                                    .icon(FamIcon::Remove)
-                                    .ghost()
-                                    .tooltip("Clear search")
-                                    .on_click(cx.listener(|this, event, window, cx| {
-                                        let _ = event;
-                                        this.clear_search(window, cx)
-                                    })),
+                            .on_mouse_down(MouseButton::Left, |event, window, cx| {
+                                if event.click_count == 3 {
+                                    window.defer(cx, |window, cx| {
+                                        window.dispatch_action(Box::new(SelectAll), cx);
+                                    });
+                                }
+                            })
+                            .child(
+                                Input::new(&self.search_input).w_full().suffix(
+                                    Button::new("clear-search")
+                                        .icon(FamIcon::Remove)
+                                        .ghost()
+                                        .tooltip("Clear search")
+                                        .on_click(cx.listener(|this, event, window, cx| {
+                                            let _ = event;
+                                            this.clear_search(window, cx)
+                                        })),
+                                ),
                             ),
                     )
                     .child(
@@ -431,26 +466,38 @@ impl Render for BibRefApp {
                 div()
                     .flex()
                     .w_full()
+                    .min_w(px(0.0))
                     .gap_2()
                     .child(
-                        Input::new(&self.filter_input)
+                        div()
                             .flex_1()
-                            .min_w(px(120.0))
-                            .suffix(
-                                Button::new("clear-filter")
-                                    .icon(FamIcon::Remove)
-                                    .ghost()
-                                    .tooltip("Clear filter")
-                                    .on_click(cx.listener(|this, event, window, cx| {
-                                        let _ = event;
-                                        this.clear_filter(window, cx)
-                                    })),
+                            .min_w(px(0.0))
+                            .on_mouse_down(MouseButton::Left, |event, window, cx| {
+                                if event.click_count == 3 {
+                                    window.defer(cx, |window, cx| {
+                                        window.dispatch_action(Box::new(SelectAll), cx);
+                                    });
+                                }
+                            })
+                            .child(
+                                Input::new(&self.filter_input).w_full().suffix(
+                                    Button::new("clear-filter")
+                                        .icon(FamIcon::Remove)
+                                        .ghost()
+                                        .tooltip("Clear filter")
+                                        .on_click(cx.listener(|this, event, window, cx| {
+                                            let _ = event;
+                                            this.clear_filter(window, cx)
+                                        })),
+                                ),
                             ),
                     )
                     .child(
-                        Select::new(&self.filter_type)
-                            .w(px(108.0))
-                            .menu_width(px(120.0)),
+                        div().flex_none().w(px(96.0)).child(
+                            Select::new(&self.filter_type)
+                                .w_full()
+                                .menu_width(px(120.0)),
+                        ),
                     ),
             )
             .child(div().text_sm().text_color(rgb(0xb3261e)).child(error))
@@ -478,21 +525,9 @@ impl Render for BibRefApp {
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
                     .items_center()
-                    .justify_end()
+                    .justify_between()
                     .gap_2()
-                    .child(
-                        Button::new("open-selected-url")
-                            .icon(FamIcon::Open)
-                            .tooltip("Open DOI/arXiv")
-                            .outline()
-                            .disabled(!has_selected_url)
-                            .on_click(cx.listener(|this, event, window, cx| {
-                                let _ = event;
-                                this.open_result(window, cx)
-                            })),
-                    )
                     .child(
                         Checkbox::new("copy-with-code-fence")
                             .label("Code fence")
@@ -505,15 +540,32 @@ impl Render for BibRefApp {
                             }),
                     )
                     .child(
-                        Button::new("copy")
-                            .icon(FamIcon::Copy)
-                            .tooltip("Copy")
-                            .primary()
-                            .disabled(self.selected.is_none())
-                            .on_click(cx.listener(|this, event, window, cx| {
-                                let _ = event;
-                                this.copy_selected(window, cx)
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("open-selected-url")
+                                    .icon(FamIcon::Open)
+                                    .tooltip("Open DOI/arXiv")
+                                    .outline()
+                                    .disabled(!has_selected_url)
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        let _ = event;
+                                        this.open_result(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("copy")
+                                    .icon(FamIcon::Copy)
+                                    .tooltip("Copy")
+                                    .primary()
+                                    .disabled(self.selected.is_none())
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        let _ = event;
+                                        this.copy_selected(window, cx)
+                                    })),
+                            ),
                     ),
             )
             .when(!status.is_empty(), |this| {
@@ -529,6 +581,13 @@ impl Render for BibRefApp {
                     .border_color(rgb(0xdadce0))
                     .bg(rgb(0xffffff))
                     .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |event, window, cx| {
+                        if event.click_count == 3 {
+                            window.defer(cx, |window, cx| {
+                                window.dispatch_action(Box::new(SelectAll), cx);
+                            });
+                        }
+                    })
                     .child(
                         Input::new(&self.bibtex_input)
                             .h_full()
