@@ -76,7 +76,7 @@ fn citation_key(record: &WorkRecord) -> String {
     let first_author = record
         .authors
         .first()
-        .map(|author| ascii_key_part(&author.family))
+        .map(|author| citation_family_key(&author.family))
         .filter(|part| !part.is_empty())
         .unwrap_or_else(|| "ref".to_string());
     let year = record
@@ -91,6 +91,14 @@ fn citation_key(record: &WorkRecord) -> String {
         year,
         title_word.to_lowercase()
     )
+}
+
+fn citation_family_key(family: &str) -> String {
+    family
+        .split_whitespace()
+        .next_back()
+        .map(ascii_key_part)
+        .unwrap_or_default()
 }
 
 fn title_key_word(title: &str) -> Option<String> {
@@ -262,5 +270,27 @@ mod tests {
         };
 
         assert!(format_bibtex(&record).starts_with("@phdthesis{staub2024new,"));
+    }
+
+    #[test]
+    fn citation_key_uses_terminal_component_of_compound_family_name() {
+        let record = WorkRecord {
+            title: "Ground-state properties of dipolar Bose polarons".to_string(),
+            authors: vec![Author::new(Some("L. A.".to_string()), "Peña Ardila")],
+            year: Some(2019),
+            container_title: Some(
+                "Journal of Physics B: Atomic, Molecular and Optical Physics".to_string(),
+            ),
+            volume: Some("52".to_string()),
+            number: None,
+            pages: None,
+            publisher: None,
+            doi: Some("10.1088/1361-6455/aaf35e".to_string()),
+            arxiv_id: None,
+            source: SourceKind::Crossref,
+            entry_type: "article".to_string(),
+        };
+
+        assert!(format_bibtex(&record).starts_with("@article{ardila2019ground,"));
     }
 }

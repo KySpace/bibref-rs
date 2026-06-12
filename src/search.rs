@@ -202,6 +202,13 @@ impl BibSearchClient {
             .crossref_citation_query(query, filter)
             .unwrap_or_default();
 
+        for fallback_record in self
+            .crossref_citation_fallback_query(query, filter)
+            .unwrap_or_default()
+        {
+            merge_or_push(&mut records, fallback_record);
+        }
+
         for arxiv_record in self.arxiv_citation_query(query, filter).unwrap_or_default() {
             merge_or_push(&mut records, arxiv_record);
         }
@@ -280,11 +287,32 @@ impl BibSearchClient {
             urlencoding::encode(&query.author),
             urlencoding::encode(&query.title_word)
         );
-        if let Some(year) = query.publication_year {
-            url.push_str(&format!(
-                "&filter=from-pub-date:{year}-01-01,until-pub-date:{year}-12-31"
-            ));
-        }
+        append_crossref_filter(&mut url, filter);
+
+        let response: CrossrefSearchResponse =
+            self.http.get(url).send()?.error_for_status()?.json()?;
+        Ok(response
+            .message
+            .items
+            .into_iter()
+            .map(crossref_item_to_record)
+            .collect())
+    }
+
+    fn crossref_citation_fallback_query(
+        &self,
+        query: &CitationKeyQuery,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<WorkRecord>> {
+        let bibliographic_query = format!(
+            "{} {} {}",
+            query.author, query.year_fragment, query.title_word
+        );
+        let mut url = format!(
+            "{}?query.bibliographic={}&rows=25",
+            CROSSREF_BASE,
+            urlencoding::encode(&bibliographic_query)
+        );
         append_crossref_filter(&mut url, filter);
 
         let response: CrossrefSearchResponse =
@@ -429,9 +457,10 @@ fn record_matches_filter(record: &WorkRecord, filter: &SearchFilter) -> bool {
 }
 
 fn citation_candidate_matches(record: &WorkRecord, query: &CitationKeyQuery) -> bool {
-    let author_matches = record.authors.first().is_some_and(|author| {
-        normalize_key_part(&author.family) == query.author.to_ascii_lowercase()
-    });
+    let author_matches = record
+        .authors
+        .first()
+        .is_some_and(|author| citation_family_matches(&author.family, &query.author));
     let year_matches = query
         .publication_year
         .is_none_or(|year| record.year == Some(year));
@@ -444,9 +473,11 @@ fn citation_candidate_matches(record: &WorkRecord, query: &CitationKeyQuery) -> 
 fn citation_match_score(record: &WorkRecord, query: &CitationKeyQuery) -> u8 {
     let mut score = 0;
 
-    if record.authors.first().is_some_and(|author| {
-        normalize_key_part(&author.family) == query.author.to_ascii_lowercase()
-    }) {
+    if record
+        .authors
+        .first()
+        .is_some_and(|author| citation_family_matches(&author.family, &query.author))
+    {
         score += 4;
     }
     if query
@@ -463,6 +494,15 @@ fn citation_match_score(record: &WorkRecord, query: &CitationKeyQuery) -> u8 {
     }
 
     score
+}
+
+fn citation_family_matches(family: &str, query_author: &str) -> bool {
+    let query_author = query_author.to_ascii_lowercase();
+    normalize_key_part(family) == query_author
+        || family
+            .split_whitespace()
+            .next_back()
+            .is_some_and(|part| normalize_key_part(part) == query_author)
 }
 
 fn citation_title_starts_with(record: &WorkRecord, query: &CitationKeyQuery) -> bool {
@@ -868,6 +908,35 @@ mod tests {
             ..unrelated
         };
         assert!(!citation_title_starts_with(&contains_later, &query));
+    }
+
+    #[test]
+    fn citation_key_matches_terminal_component_of_compound_family_name() {
+        let query = CitationKeyQuery {
+            author: "ardila".to_string(),
+            year_fragment: "2019".to_string(),
+            title_word: "ground".to_string(),
+            publication_year: Some(2019),
+        };
+        let record = WorkRecord {
+            title: "Ground-state properties of dipolar Bose polarons".to_string(),
+            authors: vec![Author::new(Some("L. A.".to_string()), "Peña Ardila")],
+            year: Some(2019),
+            container_title: Some(
+                "Journal of Physics B: Atomic, Molecular and Optical Physics".to_string(),
+            ),
+            volume: Some("52".to_string()),
+            number: None,
+            pages: None,
+            publisher: None,
+            doi: Some("10.1088/1361-6455/aaf35e".to_string()),
+            arxiv_id: None,
+            source: SourceKind::Crossref,
+            entry_type: "article".to_string(),
+        };
+
+        assert!(citation_candidate_matches(&record, &query));
+        assert_eq!(citation_match_score(&record, &query), 12);
     }
 
     #[test]
