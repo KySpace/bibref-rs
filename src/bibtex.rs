@@ -83,12 +83,7 @@ fn citation_key(record: &WorkRecord) -> String {
         .year
         .map(|year| year.to_string())
         .unwrap_or_else(|| "nodate".to_string());
-    let title_word = record
-        .title
-        .split_whitespace()
-        .map(|word| ascii_key_part(word))
-        .find(|word| !word.is_empty())
-        .unwrap_or_else(|| "work".to_string());
+    let title_word = title_key_word(&record.title).unwrap_or_else(|| "work".to_string());
 
     format!(
         "{}{}{}",
@@ -96,6 +91,13 @@ fn citation_key(record: &WorkRecord) -> String {
         year,
         title_word.to_lowercase()
     )
+}
+
+fn title_key_word(title: &str) -> Option<String> {
+    title
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(ascii_key_part)
+        .find(|word| !word.is_empty() && !matches!(word.as_str(), "a" | "an" | "the"))
 }
 
 fn ascii_key_part(input: &str) -> String {
@@ -219,5 +221,46 @@ mod tests {
         assert!(bib.contains("title={Caf\\'{e} \\& r\\'{e}sum\\'{e}}"));
         assert!(bib.contains("author={Garc\\'{i}a, Ren\\'{e}}"));
         assert!(bib.contains("doi={10.1234/example}"));
+    }
+
+    #[test]
+    fn citation_key_splits_hyphenated_title_words() {
+        let record = WorkRecord {
+            title: "High-fidelity gates with mid-circuit erasure conversion in an atomic qubit"
+                .to_string(),
+            authors: vec![Author::new(Some("Shuo".to_string()), "Ma")],
+            year: Some(2023),
+            container_title: Some("Nature".to_string()),
+            volume: Some("622".to_string()),
+            number: None,
+            pages: None,
+            publisher: Some("Springer Science and Business Media LLC".to_string()),
+            doi: Some("10.1038/s41586-023-06438-1".to_string()),
+            arxiv_id: None,
+            source: SourceKind::Crossref,
+            entry_type: "article".to_string(),
+        };
+
+        assert!(format_bibtex(&record).starts_with("@article{ma2023high,"));
+    }
+
+    #[test]
+    fn citation_key_skips_leading_articles() {
+        let record = WorkRecord {
+            title: "A new experiment".to_string(),
+            authors: vec![Author::new(Some("Etienne".to_string()), "Staub")],
+            year: Some(2024),
+            container_title: None,
+            volume: None,
+            number: None,
+            pages: None,
+            publisher: None,
+            doi: None,
+            arxiv_id: None,
+            source: SourceKind::Crossref,
+            entry_type: "phdthesis".to_string(),
+        };
+
+        assert!(format_bibtex(&record).starts_with("@phdthesis{staub2024new,"));
     }
 }

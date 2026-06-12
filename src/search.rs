@@ -11,7 +11,16 @@ const ARXIV_BASE: &str = "https://export.arxiv.org/api/query";
 pub enum QueryKind {
     Doi(String),
     Arxiv(String),
+    CitationKey(CitationKeyQuery),
     Bibliographic(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitationKeyQuery {
+    pub author: String,
+    pub year_fragment: String,
+    pub title_word: String,
+    pub publication_year: Option<i32>,
 }
 
 pub fn classify_query(input: &str) -> QueryKind {
@@ -41,14 +50,14 @@ pub fn classify_query(input: &str) -> QueryKind {
         return QueryKind::Arxiv(trimmed.to_string());
     }
 
-    if let Some(query) = citation_key_to_query(trimmed) {
-        return QueryKind::Bibliographic(query);
+    if let Some(query) = parse_citation_key(trimmed) {
+        return QueryKind::CitationKey(query);
     }
 
     QueryKind::Bibliographic(trimmed.to_string())
 }
 
-fn citation_key_to_query(input: &str) -> Option<String> {
+fn parse_citation_key(input: &str) -> Option<CitationKeyQuery> {
     let key = input.trim();
     if key.contains(char::is_whitespace)
         || key.len() < 8
@@ -73,24 +82,30 @@ fn citation_key_to_query(input: &str) -> Option<String> {
             continue;
         }
 
-        if !looks_like_year_or_arxiv_month(year) {
+        let publication_year = publication_year(year);
+        if publication_year.is_none() && !looks_like_arxiv_month(year) {
             continue;
         }
 
-        return Some(format!("{} {} {}", author, year, title_word));
+        return Some(CitationKeyQuery {
+            author: author.to_string(),
+            year_fragment: year.to_string(),
+            title_word: title_word.to_string(),
+            publication_year,
+        });
     }
 
     None
 }
 
-fn looks_like_year_or_arxiv_month(value: &str) -> bool {
-    let Ok(number) = value.parse::<i32>() else {
-        return false;
-    };
-    if (1800..=2100).contains(&number) {
-        return true;
-    }
+fn publication_year(value: &str) -> Option<i32> {
+    value
+        .parse::<i32>()
+        .ok()
+        .filter(|year| (1800..=2100).contains(year))
+}
 
+fn looks_like_arxiv_month(value: &str) -> bool {
     let Some(month) = value.get(2..4).and_then(|part| part.parse::<i32>().ok()) else {
         return false;
     };
@@ -137,8 +152,28 @@ impl BibSearchClient {
         match classify_query(input) {
             QueryKind::Doi(doi) => self.crossref_doi(&doi).map(|record| vec![record]),
             QueryKind::Arxiv(id) => self.arxiv_id(&id).map(|record| vec![record]),
+            QueryKind::CitationKey(query) => self.search_citation_key(&query),
             QueryKind::Bibliographic(query) => self.search_bibliographic(&query),
         }
+    }
+
+    fn search_citation_key(&self, query: &CitationKeyQuery) -> Result<Vec<WorkRecord>> {
+        let mut records = self.crossref_citation_query(query).unwrap_or_default();
+
+        for arxiv_record in self.arxiv_citation_query(query).unwrap_or_default() {
+            merge_or_push(&mut records, arxiv_record);
+        }
+
+        records.retain(|record| citation_candidate_matches(record, query));
+        records.sort_by(|left, right| {
+            citation_title_starts_with(right, query)
+                .cmp(&citation_title_starts_with(left, query))
+                .then_with(|| {
+                    citation_match_score(right, query).cmp(&citation_match_score(left, query))
+                })
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        Ok(records.into_iter().take(5).collect())
     }
 
     fn search_bibliographic(&self, query: &str) -> Result<Vec<WorkRecord>> {
@@ -166,6 +201,29 @@ impl BibSearchClient {
             CROSSREF_BASE,
             urlencoding::encode(query)
         );
+        let response: CrossrefSearchResponse =
+            self.http.get(url).send()?.error_for_status()?.json()?;
+        Ok(response
+            .message
+            .items
+            .into_iter()
+            .map(crossref_item_to_record)
+            .collect())
+    }
+
+    fn crossref_citation_query(&self, query: &CitationKeyQuery) -> Result<Vec<WorkRecord>> {
+        let mut url = format!(
+            "{}?query.author={}&query.title={}&rows=100",
+            CROSSREF_BASE,
+            urlencoding::encode(&query.author),
+            urlencoding::encode(&query.title_word)
+        );
+        if let Some(year) = query.publication_year {
+            url.push_str(&format!(
+                "&filter=from-pub-date:{year}-01-01,until-pub-date:{year}-12-31"
+            ));
+        }
+
         let response: CrossrefSearchResponse =
             self.http.get(url).send()?.error_for_status()?.json()?;
         Ok(response
@@ -205,6 +263,82 @@ impl BibSearchClient {
             .map(arxiv_entry_to_record)
             .collect())
     }
+
+    fn arxiv_citation_query(&self, query: &CitationKeyQuery) -> Result<Vec<WorkRecord>> {
+        let search_query = format!("au:{} AND ti:{}", query.author, query.title_word);
+        let url = format!(
+            "{}?search_query={}&start=0&max_results=25",
+            ARXIV_BASE,
+            urlencoding::encode(&search_query)
+        );
+        let text = self.http.get(url).send()?.error_for_status()?.text()?;
+        let feed: ArxivFeed = from_str(&text).context("parsing arXiv Atom response")?;
+        Ok(feed
+            .entries
+            .into_iter()
+            .map(arxiv_entry_to_record)
+            .collect())
+    }
+}
+
+fn citation_candidate_matches(record: &WorkRecord, query: &CitationKeyQuery) -> bool {
+    let author_matches = record.authors.first().is_some_and(|author| {
+        normalize_key_part(&author.family) == query.author.to_ascii_lowercase()
+    });
+    let year_matches = query
+        .publication_year
+        .is_none_or(|year| record.year == Some(year));
+    let title_matches =
+        title_words(&record.title).any(|word| word == query.title_word.to_ascii_lowercase());
+
+    author_matches && year_matches && title_matches
+}
+
+fn citation_match_score(record: &WorkRecord, query: &CitationKeyQuery) -> u8 {
+    let mut score = 0;
+
+    if record.authors.first().is_some_and(|author| {
+        normalize_key_part(&author.family) == query.author.to_ascii_lowercase()
+    }) {
+        score += 4;
+    }
+    if query
+        .publication_year
+        .is_some_and(|year| record.year == Some(year))
+    {
+        score += 3;
+    }
+    if title_words(&record.title).any(|word| word == query.title_word.to_ascii_lowercase()) {
+        score += 3;
+    }
+    if citation_title_starts_with(record, query) {
+        score += 2;
+    }
+
+    score
+}
+
+fn citation_title_starts_with(record: &WorkRecord, query: &CitationKeyQuery) -> bool {
+    first_title_word(&record.title).as_deref() == Some(&query.title_word.to_ascii_lowercase())
+}
+
+fn first_title_word(title: &str) -> Option<String> {
+    title_words(title).find(|word| !matches!(word.as_str(), "a" | "an" | "the"))
+}
+
+fn title_words(title: &str) -> impl Iterator<Item = String> + '_ {
+    title
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(normalize_key_part)
+        .filter(|word| !word.is_empty())
+}
+
+fn normalize_key_part(input: &str) -> String {
+    input
+        .chars()
+        .flat_map(|ch| ch.to_lowercase())
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn merge_or_push(records: &mut Vec<WorkRecord>, candidate: WorkRecord) {
@@ -434,11 +568,21 @@ mod tests {
     fn classifies_google_scholar_style_citation_keys() {
         assert_eq!(
             classify_query("blakie2023compressibility"),
-            QueryKind::Bibliographic("blakie 2023 compressibility".to_string())
+            QueryKind::CitationKey(CitationKeyQuery {
+                author: "blakie".to_string(),
+                year_fragment: "2023".to_string(),
+                title_word: "compressibility".to_string(),
+                publication_year: Some(2023),
+            })
         );
         assert_eq!(
             classify_query("Gallemi2025Excitation"),
-            QueryKind::Bibliographic("Gallemi 2025 Excitation".to_string())
+            QueryKind::CitationKey(CitationKeyQuery {
+                author: "Gallemi".to_string(),
+                year_fragment: "2025".to_string(),
+                title_word: "Excitation".to_string(),
+                publication_year: Some(2025),
+            })
         );
         assert_eq!(
             classify_query("compressibility"),
@@ -481,16 +625,82 @@ mod tests {
         assert_eq!(
             queries,
             vec![
-                QueryKind::Bibliographic("tanzi 2019 supersolid".to_string()),
-                QueryKind::Bibliographic("natale 2019 excitation".to_string()),
-                QueryKind::Bibliographic("scheiermann 2025 excitation".to_string()),
-                QueryKind::Bibliographic("lin 2412 ai".to_string()),
-                QueryKind::Bibliographic("vsindik 2024 sound".to_string()),
-                QueryKind::Bibliographic("sanchez 2023 heating".to_string()),
-                QueryKind::Bibliographic("staub 2024 new".to_string()),
-                QueryKind::Bibliographic("biss 2023 probing".to_string()),
+                citation_query("tanzi", "2019", "supersolid", Some(2019)),
+                citation_query("natale", "2019", "excitation", Some(2019)),
+                citation_query("scheiermann", "2025", "excitation", Some(2025)),
+                citation_query("lin", "2412", "ai", None),
+                citation_query("vsindik", "2024", "sound", Some(2024)),
+                citation_query("sanchez", "2023", "heating", Some(2023)),
+                citation_query("staub", "2024", "new", Some(2024)),
+                citation_query("biss", "2023", "probing", Some(2023)),
             ]
         );
+    }
+
+    fn citation_query(
+        author: &str,
+        year_fragment: &str,
+        title_word: &str,
+        publication_year: Option<i32>,
+    ) -> QueryKind {
+        QueryKind::CitationKey(CitationKeyQuery {
+            author: author.to_string(),
+            year_fragment: year_fragment.to_string(),
+            title_word: title_word.to_string(),
+            publication_year,
+        })
+    }
+
+    #[test]
+    fn ranks_citation_key_matches_by_author_year_and_title_word() {
+        let query = CitationKeyQuery {
+            author: "ma".to_string(),
+            year_fragment: "2023".to_string(),
+            title_word: "high".to_string(),
+            publication_year: Some(2023),
+        };
+        let exact = WorkRecord {
+            title:
+                "High-fidelity gates with mid-circuit erasure conversion in a metastable neutral atom qubit"
+                    .to_string(),
+            authors: vec![Author::new(Some("Shuo".to_string()), "Ma")],
+            year: Some(2023),
+            container_title: Some("Nature".to_string()),
+            volume: Some("622".to_string()),
+            number: None,
+            pages: None,
+            publisher: None,
+            doi: Some("10.1038/s41586-023-06438-1".to_string()),
+            arxiv_id: None,
+            source: SourceKind::Crossref,
+            entry_type: "article".to_string(),
+        };
+        let unrelated = WorkRecord {
+            title: "High-energy physics".to_string(),
+            authors: vec![Author::new(Some("Ada".to_string()), "Lovelace")],
+            year: Some(2022),
+            container_title: None,
+            volume: None,
+            number: None,
+            pages: None,
+            publisher: None,
+            doi: None,
+            arxiv_id: None,
+            source: SourceKind::Crossref,
+            entry_type: "article".to_string(),
+        };
+
+        assert!(citation_match_score(&exact, &query) > citation_match_score(&unrelated, &query));
+        assert!(citation_title_starts_with(&exact, &query));
+
+        let contains_later = WorkRecord {
+            title: "A model with high accuracy".to_string(),
+            authors: vec![Author::new(Some("Shuo".to_string()), "Ma")],
+            year: Some(2023),
+            source: SourceKind::Arxiv,
+            ..unrelated
+        };
+        assert!(!citation_title_starts_with(&contains_later, &query));
     }
 
     #[test]
